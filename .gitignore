@@ -221,3 +221,6 @@ __marimo__/
 # VSC
 .vscode/
 
+#output
+output.lizip
+

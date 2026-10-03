@@ -54,7 +54,8 @@ def compute_raw_and_residuals(input_path, model_path):
     data_loader = _load_module("data_loader", "src/utils/data_loader.py")
 
     raw   = data_loader.load_point_cloud(input_path)[:, :3]
-    pts   = voxel_sort.voxel_quantize_and_sort(raw).astype(np.float32)
+    pts, _  = voxel_sort.voxel_quantize_and_sort(raw)
+    pts = pts.astype(np.float32)
     pts_mm = np.round(pts * RESID_SCALE).astype(np.int32)          # int32 quantised
 
     # load model

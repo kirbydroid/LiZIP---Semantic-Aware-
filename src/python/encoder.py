@@ -34,29 +34,16 @@ def shuffle_bytes(arr):
     # Transpose to (4, N) and flatten
     return arr_bytes.T.tobytes()
 
-def encode_file_closed_loop(input_path, output_path, model, debug_gt_path=None, compression='zlib', input_format='auto'):
-    print(f"Encoding (Zero-Drift Quantized, {compression}): {input_path}")
-    
-    if hasattr(model, 'context_size'):
-        context_size = model.context_size
-    else:
-        first_layer = [m for m in model.modules() if isinstance(m, torch.nn.Linear)][0]
-        context_size = first_layer.in_features // 3
-    print(f"Detected Model Context Size: {context_size}")
+""" takes the core of previous encode_file_closed_loop and adds in encode segment, taking any group of points and any scale, 
+    helping us call the function once per classification/tier??? 
+"""
 
-    if debug_gt_path is None:
-        debug_gt_path = DEFAULT_DEBUG_GT_FILE
-
-    # Load data
-    raw_points = load_point_cloud(input_path)
-    points_xyz = raw_points[:, :3]
-    sorted_points = voxel_quantize_and_sort(points_xyz).astype(np.float32)
-    
-    points_mm = np.round(sorted_points * RESID_SCALE).astype(np.int32)
-    
-    os.makedirs(os.path.dirname(debug_gt_path) or '.', exist_ok=True)
-    (points_mm.astype(np.float32) / RESID_SCALE).tofile(debug_gt_path)
-    
+def encode_segment(sorted_points, scale, model, context_size):
+    """
+    Encodes alr sorted group of points at one quantization scale.
+    Returns: heads_shuffled(bytes), residuals_shuffled(bytes), num_blocks, valid_residuals_np
+    """
+    points_mm = np.round(sorted_points * scale).astype(np.int32)
     num_points = len(sorted_points)
     num_blocks = (num_points + BLOCK_SIZE - 1) // BLOCK_SIZE
     
@@ -73,8 +60,8 @@ def encode_file_closed_loop(input_path, output_path, model, debug_gt_path=None, 
         heads_mm.append(h)
     
     heads_mm_tensor = torch.stack(heads_mm)
-    
-    context = heads_mm_tensor.float() / RESID_SCALE
+
+    context = heads_mm_tensor.float() / scale
     context = context.reshape(num_blocks, -1)
     
     max_preds_per_block = BLOCK_SIZE - context_size
@@ -88,51 +75,81 @@ def encode_file_closed_loop(input_path, output_path, model, debug_gt_path=None, 
             
             if not any(valid_mask):
                 break
-                
+
             predictions_float = model(context)
-            
+
             if torch.isnan(predictions_float).any():
                 print(f"\nCRITICAL: NaN detected at step {i}")
                 break
 
             targets_mm = torch.zeros((num_blocks, 3), dtype=torch.int32, device=device)
             targets_mm[valid_mask] = points_mm_gpu[target_indices[valid_mask]]
-            
-            preds_mm = torch.round(predictions_float * RESID_SCALE).int()
+
+            preds_mm = torch.round(predictions_float * scale).int()
             resid_mm = targets_mm - preds_mm
-            
+
             residuals_tensor[:, i, :] = resid_mm
-            
+
             recon_mm = preds_mm + resid_mm
-            recon_float = recon_mm.float() / RESID_SCALE
-            
+            recon_float = recon_mm.float() / scale
+
             context[:, :-3] = context[:, 3:]
             context[:, -3:] = recon_float
-
-    print(f"Neural Prediction Complete. Time: {time.time() - start_time:.2f}s")
-
-    valid_mask_all = torch.zeros((num_blocks, max_preds_per_block), dtype=torch.bool, device=device)
 
     bs_tensor = torch.from_numpy(block_starts).to(device).unsqueeze(1) # (B, 1)
     steps_tensor = torch.arange(max_preds_per_block, device=device).unsqueeze(0) # (1, P)
     target_indices_map = bs_tensor + context_size + steps_tensor # (B, P)
     valid_mask_all = target_indices_map < num_points
-    
-    valid_residuals = residuals_tensor[valid_mask_all] # (TotalValidPreds, 3)
-    valid_residuals_np = valid_residuals.cpu().numpy()
+
+    valid_residuals_np = residuals_tensor[valid_mask_all].cpu().numpy() # (TotalValidPreds, 3)
 
     residuals_np = residuals_tensor.cpu().numpy()
     heads_np = heads_mm_tensor.cpu().numpy()
-    
+
     # Delta Encode Heads to improve compression
     # shape: (num_blocks, context, 3) -> flat
     heads_flat = heads_np.reshape(-1, 3)
     heads_delta = np.zeros_like(heads_flat)
     heads_delta[0] = heads_flat[0]
     heads_delta[1:] = heads_flat[1:] - heads_flat[:-1]
-    
+
     heads_shuffled = shuffle_bytes(heads_delta)
     residuals_shuffled = shuffle_bytes(residuals_np)
+
+    return heads_shuffled, residuals_shuffled, num_blocks, valid_residuals_np
+
+
+
+def encode_file_closed_loop(input_path, output_path, model, debug_gt_path=None, compression='zlib', input_format='auto'):
+    print(f"Encoding (Zero-Drift Quantized, {compression}): {input_path}")
+    
+    if hasattr(model, 'context_size'):
+        context_size = model.context_size
+    else:
+        first_layer = [m for m in model.modules() if isinstance(m, torch.nn.Linear)][0]
+        context_size = first_layer.in_features // 3
+    print(f"Detected Model Context Size: {context_size}")
+
+    if debug_gt_path is None:
+        debug_gt_path = DEFAULT_DEBUG_GT_FILE
+
+    # Load data
+    raw_points = load_point_cloud(input_path)
+    points_xyz = raw_points[:, :3]
+    sorted_points, sort_indices = voxel_quantize_and_sort(points_xyz)
+    sorted_points = sorted_points.astype(np.float32)
+    
+    points_mm = np.round(sorted_points * RESID_SCALE).astype(np.int32)
+
+    os.makedirs(os.path.dirname(debug_gt_path) or '.', exist_ok=True)
+    (points_mm.astype(np.float32) / RESID_SCALE).tofile(debug_gt_path)
+
+    num_points = len(sorted_points)
+
+    start_time = time.time()
+    heads_shuffled, residuals_shuffled, num_blocks, valid_residuals_np = encode_segment(
+        sorted_points, RESID_SCALE, model, context_size)
+    print(f"Neural Prediction Complete. Time: {time.time() - start_time:.2f}s")
     
     # Payload Construction
     payload = heads_shuffled + residuals_shuffled

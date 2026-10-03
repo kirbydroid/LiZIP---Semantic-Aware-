@@ -9,7 +9,8 @@ def voxel_quantize_and_sort(points, grid_size=0.10):
         grid_size: The size of the voxel edge (e.g., 10cm)
         
     Returns:
-        sorted_points: The re-ordered point cloud
+        sorted_points: The re-ordered point cloud or (points and indices) if return = True.
+        sort _indices[i] is the original row of the point  pos 1
     """
     voxel_coords = np.floor(points[:, :3] / grid_size).astype(np.int32)
     
@@ -21,4 +22,6 @@ def voxel_quantize_and_sort(points, grid_size=0.10):
     
     sorted_points = points[sort_indices]
     
-    return sorted_points
+  
+    return sorted_points, sort_indices
+    

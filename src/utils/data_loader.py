@@ -15,6 +15,24 @@ def load_nuscenes_lidar(path):
     points = scan.reshape((-1, 5))
     
     return points[:, :4]
+ 
+ #--- INcluding the intensity and ring index as well to make it more spontaneous for the snn
+def load_nuscenes_lidar_all(path):
+    """
+    Loads NuScenes binary LiDAR file with all the columns, intensity and ring index included
+    NuScenes = [x,y,z,intensity,ring_index]
+    Returns: Numpy Array = (N,5)
+
+    """
+
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"File not found: {path}")
+
+    scan = np.fromfile(path, dtype=np.float32)
+
+    return scan.reshape((-1,5))
+
+# new!
 
 def load_kitti_data(path):
     """
