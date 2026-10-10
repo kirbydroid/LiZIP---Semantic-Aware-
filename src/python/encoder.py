@@ -93,8 +93,10 @@ def encode_segment(sorted_points, scale, model, context_size):
             recon_mm = preds_mm + resid_mm
             recon_float = recon_mm.float() / scale
 
-            context[:, :-3] = context[:, 3:]
-            context[:, -3:] = recon_float
+            '''context[:, :-3] = context[:, 3:]
+            context[:, -3:] = recon_float'''
+
+            context = torch.cat((context[:, 3:], recon_float), dim=1)
 
     bs_tensor = torch.from_numpy(block_starts).to(device).unsqueeze(1) # (B, 1)
     steps_tensor = torch.arange(max_preds_per_block, device=device).unsqueeze(0) # (1, P)
